@@ -275,10 +275,15 @@ final class QsSceneBridge {
             float t = (fraction - start) / span;
             if (t < 0f) t = 0f;
             else if (t > 1f) t = 1f;
-            if (t == last.getFloat(animator)) return;
-            // Native TouchAnimator only writes mLastT inside its listener branch. These
-            // listener-free plans intentionally keep that behavior, including repeat writes
-            // that can repair a pose changed by another native/module consumer.
+            // Always write, even when t equals the native animator's cached mLastT.
+            // mLastT is shared with native code paths (direct TouchAnimator runs during
+            // excluded transitions) that know nothing about this module's own spring
+            // overrides of the same views. Skipping on equality strands a stale pose:
+            // the header and clock animators cache mLastT independently, so one can be
+            // repaired while the other keeps a stale translation, which shows up as the
+            // clock stuck over the carrier row until some other transition happens to
+            // rewrite it. These writes are idempotent float setters; repeat writes are
+            // the repair mechanism the module relies on, so never skip them.
             int sharedIndex = 0;
             float sharedFraction = 0f;
             if (sharedGeometry) {

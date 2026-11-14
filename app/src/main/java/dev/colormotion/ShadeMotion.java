@@ -1308,6 +1308,13 @@ final class ShadeMotion {
         QsModel model = motionModel();
         float ty = model.translation.value;
         if (side == SIDE_SHADE) ty += model.headerTranslation();
+        // The model snaps translation to -dest() while hidden. afterSplitOpenPosition can
+        // run before the opening re-arms the model (fast/programmatic opens, side switches),
+        // which would stomp the header views to the hidden offset while the panel is open
+        // and, if no further frame runs, strand the clock over the carrier row. The native
+        // keyframe pose written for this same setPosition call is already correct for the
+        // current fraction, so leave it alone while the model is still at its hidden snap.
+        if (ty <= -model.dest() * 0.99f && panel.fraction(npvc) > 0f) return;
         for (int i = 0; i < splitHeaderViews.length; i++) {
             View v = splitHeaderViews[i];
             if (v != null) {
