@@ -403,9 +403,19 @@ final class ShadeMotion {
         hooks.findAndHookMethod(XposedHelpers.findClass(SPLIT_OPEN_ANIMATOR, cl), "setPosition$1",
                 float.class, new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
+                        dbgSetPosCount++;
+                        dbgLastSetPos = (Float) param.args[0];
+                        dbgLastOwned = false;
+                        if (dbgLastSetPos >= 0.999f && !dbgDumpPending) {
+                            dbgDumpPending = true;
+                            settleHandler.postDelayed(dbgDumpRun, 500L);
+                        } else if (dbgLastSetPos < 0.5f) dbgDumpPending = false;
                         if (!blurDriven || npvc == null || panel.barState(npvc) != 0) return;
                         try {
-                            if (qsScene.apply(param.thisObject, (Float) param.args[0])) param.setResult(null);
+                            if (qsScene.apply(param.thisObject, (Float) param.args[0])) {
+                                dbgLastOwned = true;
+                                param.setResult(null);
+                            }
                         } catch (Throwable t) { log(t); }
                     }
                     @Override
@@ -1207,6 +1217,69 @@ final class ShadeMotion {
             settleRechecks++;
             settleHandler.postDelayed(settleRecheck, settleRechecks == 1 ? 120L : 450L);
         }
+    }
+
+    // ---------------------------------------------------------------- diagnostics
+
+    private int dbgSetPosCount;
+    private float dbgLastSetPos = Float.NaN;
+    private boolean dbgLastOwned;
+    private boolean dbgDumpPending;
+    private final Runnable dbgDumpRun = new Runnable() {
+        @Override public void run() { dumpHeaderState("fully open +500ms"); }
+    };
+
+    private static String viewTag(View v) {
+        if (v == null) return "null";
+        String id;
+        try { id = v.getId() == View.NO_ID ? "-" : v.getResources().getResourceEntryName(v.getId()); }
+        catch (Throwable t) { id = "#" + v.getId(); }
+        String text = "";
+        if (v instanceof android.widget.TextView) {
+            CharSequence c = ((android.widget.TextView) v).getText();
+            if (c != null) text = " text='" + (c.length() > 20 ? c.subSequence(0, 20) : c) + "'";
+        }
+        return v.getClass().getSimpleName() + "(" + id + ") top=" + v.getTop() + " h=" + v.getHeight()
+                + " ty=" + v.getTranslationY() + " a=" + v.getAlpha() + " sy=" + v.getScaleY()
+                + " vis=" + v.getVisibility() + text;
+    }
+
+    private static void dumpChildren(StringBuilder b, View v, int depth, int max, int[] count) {
+        if (!(v instanceof android.view.ViewGroup) || depth > max) return;
+        android.view.ViewGroup g = (android.view.ViewGroup) v;
+        for (int i = 0; i < g.getChildCount() && count[0] < 80; i++) {
+            View c = g.getChildAt(i);
+            count[0]++;
+            b.append("\n  ");
+            for (int k = 0; k < depth; k++) b.append("  ");
+            b.append(viewTag(c));
+            dumpChildren(b, c, depth + 1, max, count);
+        }
+    }
+
+    /** One compact log block per opening: what the split header views really look like. */
+    private void dumpHeaderState(String why) {
+        try {
+            QsModel m = notificationRows.model;
+            StringBuilder b = new StringBuilder(Entry.TAG + ": header dump [" + why + "] frac="
+                    + (npvc == null ? Float.NaN : panel.fraction(npvc)) + " side=" + side + " driven=" + notificationDriven
+                    + " blurDriven=" + blurDriven + " modelTy=" + m.translation.value + "/"
+                    + m.translation.target + " dest=" + m.dest() + " setPos n=" + dbgSetPosCount
+                    + " last=" + dbgLastSetPos + " owned=" + dbgLastOwned);
+            for (int i = 0; i < splitHeaderViews.length; i++) {
+                b.append("\n  slot").append(i).append(nestedHeader[i] ? " nested " : " ")
+                        .append(viewTag(splitHeaderViews[i]));
+            }
+            View anchor = splitHeaderViews[1] != null ? splitHeaderViews[1] : splitHeaderViews[0];
+            if (anchor != null) {
+                View root = anchor;
+                android.view.ViewParent p = anchor.getParent();
+                for (int i = 0; i < 3 && p instanceof View; i++) { root = (View) p; p = root.getParent(); }
+                b.append("\n  root ").append(viewTag(root));
+                dumpChildren(b, root, 1, 3, new int[] {0});
+            }
+            XposedBridge.log(b.toString());
+        } catch (Throwable t) { log(t); }
     }
 
     private void stopNotificationMotion() {
