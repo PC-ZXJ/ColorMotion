@@ -156,11 +156,6 @@ final class ShadeMotion {
             }
             float scale = ValueAnimator.getDurationScale();
             if (scale == 0f) notificationRows.model.finishRebound();
-            // A released, fully open shade has exactly one valid header pose. If the release never
-            // reached the model (native fling skipped, side re-selected mid-gesture) its translation
-            // target can still hold the finger-time value, leaving the clock stranded under the
-            // carrier row. Pull it back to rest.
-            if (shadeSettledOpen()) notificationRows.model.translation.target = 0f;
             boolean busy = notificationRows.model.step(notifClock.advance(frameTimeNanos, scale));
             notificationAnimating = busy;
             if (stack != null) {
@@ -184,7 +179,6 @@ final class ShadeMotion {
                 finally { android.os.Trace.endSection(); }
             }
             if (splitOpenAnimator != null) applySplitHeaderPosition(splitOpenAnimator);
-            if (!busy) settleHeaderIfOpen();
             requestBlurFrame();
             if (traversalOrder != null) traversalOrder.drawLast(stack);
             if (busy) queueNotifFrame();
@@ -403,19 +397,9 @@ final class ShadeMotion {
         hooks.findAndHookMethod(XposedHelpers.findClass(SPLIT_OPEN_ANIMATOR, cl), "setPosition$1",
                 float.class, new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam param) {
-                        dbgSetPosCount++;
-                        dbgLastSetPos = (Float) param.args[0];
-                        dbgLastOwned = false;
-                        if (dbgLastSetPos >= 0.999f && !dbgDumpPending) {
-                            dbgDumpPending = true;
-                            settleHandler.postDelayed(dbgDumpRun, 500L);
-                        } else if (dbgLastSetPos < 0.5f) dbgDumpPending = false;
                         if (!blurDriven || npvc == null || panel.barState(npvc) != 0) return;
                         try {
-                            if (qsScene.apply(param.thisObject, (Float) param.args[0])) {
-                                dbgLastOwned = true;
-                                param.setResult(null);
-                            }
+                            if (qsScene.apply(param.thisObject, (Float) param.args[0])) param.setResult(null);
                         } catch (Throwable t) { log(t); }
                     }
                     @Override
@@ -1168,137 +1152,10 @@ final class ShadeMotion {
             return;
         }
         updateReveal(notificationRows.model, f);
-        if (shadeSettledOpen()) notificationRows.model.translation.target = 0f;
         queueNotifFrame();
     }
 
-    // ---------------------------------------------------------------- settled header repair
-
-    /** Released, fully open notification shade: nothing may keep the header off its rest pose. */
-    private boolean shadeSettledOpen() {
-        return npvc != null && side == SIDE_SHADE && notificationDriven && !panelSwitching
-                && !dragging && !inFling && activeCurve == null
-                && (!gestureInitialized || gestureReleased)
-                && panel.barState(npvc) == 0 && panel.fraction(npvc) >= 0.999f;
-    }
-
-    private final android.os.Handler settleHandler = new android.os.Handler(android.os.Looper.getMainLooper());
-    private final Runnable settleRecheck = new Runnable() {
-        @Override public void run() {
-            try { settleHeaderIfOpen(); }
-            catch (Throwable t) { log(t); }
-        }
-    };
-    private int settleRechecks;
-
-    /**
-     * Once the open shade has stopped moving, force the header/clock views onto the rest pose and
-     * re-verify shortly after, in case a late native setPosition or a stale view reference left
-     * the clock translated up against the carrier row. Idempotent and cheap: it runs once per
-     * opening plus two delayed checks.
-     */
-    private void settleHeaderIfOpen() {
-        if (splitOpenAnimator == null || !shadeSettledOpen()) return;
-        QsModel model = notificationRows.model;
-        if (model.translation.value != 0f || model.translation.target != 0f) model.translation.snapTo(0f);
-        // The animator's wrappers can be rebuilt between openings; read the live views again.
-        captureSplitViews(splitOpenAnimator);
-        float worst = 0f;
-        for (int i = 0; i < splitHeaderViews.length; i++) {
-            View v = splitHeaderViews[i];
-            if (v != null && !nestedHeader[i]) worst = Math.max(worst, Math.abs(v.getTranslationY()));
-        }
-        applySplitHeaderPosition(splitOpenAnimator);
-        if (worst > 0.5f) {
-            XposedBridge.log(Entry.TAG + ": repaired stranded shade header, translationY was " + worst + " px");
-        }
-        // Re-check twice: one frame-ish later and after the blur/layout settle.
-        settleHandler.removeCallbacks(settleRecheck);
-        if (settleRechecks < 2) {
-            settleRechecks++;
-            settleHandler.postDelayed(settleRecheck, settleRechecks == 1 ? 120L : 450L);
-        }
-    }
-
-    // ---------------------------------------------------------------- diagnostics
-
-    private int dbgSetPosCount;
-    private float dbgLastSetPos = Float.NaN;
-    private boolean dbgLastOwned;
-    private boolean dbgDumpPending;
-    private final Runnable dbgDumpRun = new Runnable() {
-        @Override public void run() { dumpHeaderState("fully open +500ms"); }
-    };
-
-    private static String viewTag(View v) {
-        if (v == null) return "null";
-        String id;
-        try { id = v.getId() == View.NO_ID ? "-" : v.getResources().getResourceEntryName(v.getId()); }
-        catch (Throwable t) { id = "#" + v.getId(); }
-        String text = "";
-        if (v instanceof android.widget.TextView) {
-            CharSequence c = ((android.widget.TextView) v).getText();
-            if (c != null) text = " text='" + (c.length() > 20 ? c.subSequence(0, 20) : c) + "'";
-        }
-        return v.getClass().getSimpleName() + "(" + id + ") top=" + v.getTop() + " h=" + v.getHeight()
-                + " ty=" + v.getTranslationY() + " a=" + v.getAlpha() + " sy=" + v.getScaleY()
-                + " vis=" + v.getVisibility() + text;
-    }
-
-    private static void dumpChildren(StringBuilder b, View v, int depth, int max, int[] count) {
-        if (!(v instanceof android.view.ViewGroup) || depth > max) return;
-        android.view.ViewGroup g = (android.view.ViewGroup) v;
-        for (int i = 0; i < g.getChildCount() && count[0] < 80; i++) {
-            View c = g.getChildAt(i);
-            count[0]++;
-            b.append("\n  ");
-            for (int k = 0; k < depth; k++) b.append("  ");
-            b.append(viewTag(c));
-            dumpChildren(b, c, depth + 1, max, count);
-        }
-    }
-
-    /** One compact log block per opening: what the split header views really look like. */
-    private void dumpHeaderState(String why) {
-        try {
-            QsModel m = notificationRows.model;
-            StringBuilder b = new StringBuilder(Entry.TAG + ": header dump [" + why + "] frac="
-                    + (npvc == null ? Float.NaN : panel.fraction(npvc)) + " side=" + side + " driven=" + notificationDriven
-                    + " blurDriven=" + blurDriven + " modelTy=" + m.translation.value + "/"
-                    + m.translation.target + " dest=" + m.dest() + " setPos n=" + dbgSetPosCount
-                    + " last=" + dbgLastSetPos + " owned=" + dbgLastOwned);
-            for (int i = 0; i < splitHeaderViews.length; i++) {
-                b.append("\n  slot").append(i).append(nestedHeader[i] ? " nested " : " ")
-                        .append(viewTag(splitHeaderViews[i]));
-            }
-            View anchor = splitHeaderViews[1] != null ? splitHeaderViews[1] : splitHeaderViews[0];
-            if (anchor != null) {
-                View root = anchor;
-                android.view.ViewParent p = anchor.getParent();
-                for (int i = 0; i < 3 && p instanceof View; i++) { root = (View) p; p = root.getParent(); }
-                b.append("\n  root ").append(viewTag(root));
-                dumpChildren(b, root, 1, 3, new int[] {0});
-            }
-            b.append("\n  ancestors of slot1:");
-            View a = splitHeaderViews[1];
-            for (int n = 0; a != null && n < 14; n++) {
-                b.append("\n    ").append(viewTag(a)).append(" y=").append(a.getY());
-                android.view.ViewParent pp = a.getParent();
-                a = pp instanceof View ? (View) pp : null;
-            }
-            b.append("\n  qsMotionView ").append(viewTag(qsMotionView.get()));
-            try { b.append("\n  qsView ").append(viewTag(qsView())); } catch (Throwable ignored) { }
-            if (splitHeaderViews[0] instanceof android.view.ViewGroup) {
-                b.append("\n  slot0 subtree:");
-                dumpChildren(b, splitHeaderViews[0], 1, 3, new int[] {0});
-            }
-            XposedBridge.log(b.toString());
-        } catch (Throwable t) { log(t); }
-    }
-
     private void stopNotificationMotion() {
-        settleHandler.removeCallbacks(settleRecheck);
-        settleRechecks = 0;
         notificationOpening.cancel();
         cancelNotifFrames();
         blurBackground.clear();
@@ -1447,8 +1304,8 @@ final class ShadeMotion {
 
     /**
      * The header clock lives inside the QS fragment's view. When a QS opening collapses, snapHidden()
-     * leaves that host translated to its hidden offset; the notification shade never resets it,
-     * so the next notification opening shows the clock lifted against the carrier row.
+     * leaves that host translated to its hidden offset; the notification shade never reset it, so
+     * the next notification opening showed the clock lifted against the carrier row.
      */
     private void releaseStaleQsHost() {
         View host = qsMotionView.get();
@@ -1456,10 +1313,7 @@ final class ShadeMotion {
             host = qsView();
             if (host != null) qsMotionView = new WeakReference<>(host);
         }
-        if (host != null && host.getTranslationY() != 0f) {
-            XposedBridge.log(Entry.TAG + ": released stale QS host translation " + host.getTranslationY());
-            host.setTranslationY(0f);
-        }
+        if (host != null && host.getTranslationY() != 0f) host.setTranslationY(0f);
     }
 
     private void applySplitHeaderPosition(Object animator) {
