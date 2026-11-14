@@ -12,10 +12,29 @@ import de.robv.android.xposed.XposedHelpers;
 final class HookSet {
     private final ArrayList<XC_MethodHook.Unhook> installed = new ArrayList<>();
 
+    /** Diagnostic: logs the first calls of every hooked method, to see which hooks are alive. */
+    private static final class Probe extends XC_MethodHook {
+        private final String name;
+        private int calls;
+        Probe(String name) { this.name = name; }
+        @Override protected void beforeHookedMethod(MethodHookParam param) {
+            calls++;
+            if (calls == 1 || calls == 50 || calls == 500) {
+                XposedBridge.log(Entry.TAG + ": probe " + name + " calls=" + calls);
+            }
+        }
+    }
+
     XC_MethodHook.Unhook method(Member member, XC_MethodHook callback) {
         XC_MethodHook.Unhook hook = XposedBridge.hookMethod(member, callback);
         if (hook == null) throw new IllegalStateException("Native hook registration failed: " + member);
         installed.add(hook);
+        String label = member.getDeclaringClass().getSimpleName() + "#" + member.getName();
+        try {
+            XC_MethodHook.Unhook probe = XposedBridge.hookMethod(member, new Probe(label));
+            if (probe != null) installed.add(probe);
+            XposedBridge.log(Entry.TAG + ": probe registered " + label);
+        } catch (Throwable ignored) { }
         return hook;
     }
 
