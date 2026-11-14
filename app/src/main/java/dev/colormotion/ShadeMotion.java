@@ -156,6 +156,11 @@ final class ShadeMotion {
             }
             float scale = ValueAnimator.getDurationScale();
             if (scale == 0f) notificationRows.model.finishRebound();
+            // A released, fully open shade has exactly one valid header pose. If the release never
+            // reached the model (native fling skipped, side re-selected mid-gesture) its translation
+            // target can still hold the finger-time value, leaving the clock stranded under the
+            // carrier row. Pull it back to rest.
+            if (shadeSettledOpen()) notificationRows.model.translation.target = 0f;
             boolean busy = notificationRows.model.step(notifClock.advance(frameTimeNanos, scale));
             notificationAnimating = busy;
             if (stack != null) {
@@ -179,6 +184,7 @@ final class ShadeMotion {
                 finally { android.os.Trace.endSection(); }
             }
             if (splitOpenAnimator != null) applySplitHeaderPosition(splitOpenAnimator);
+            if (!busy) settleHeaderIfOpen();
             requestBlurFrame();
             if (traversalOrder != null) traversalOrder.drawLast(stack);
             if (busy) queueNotifFrame();
@@ -1151,10 +1157,61 @@ final class ShadeMotion {
             return;
         }
         updateReveal(notificationRows.model, f);
+        if (shadeSettledOpen()) notificationRows.model.translation.target = 0f;
         queueNotifFrame();
     }
 
+    // ---------------------------------------------------------------- settled header repair
+
+    /** Released, fully open notification shade: nothing may keep the header off its rest pose. */
+    private boolean shadeSettledOpen() {
+        return npvc != null && side == SIDE_SHADE && notificationDriven && !panelSwitching
+                && !dragging && !inFling && activeCurve == null
+                && (!gestureInitialized || gestureReleased)
+                && panel.barState(npvc) == 0 && panel.fraction(npvc) >= 0.999f;
+    }
+
+    private final android.os.Handler settleHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable settleRecheck = new Runnable() {
+        @Override public void run() {
+            try { settleHeaderIfOpen(); }
+            catch (Throwable t) { log(t); }
+        }
+    };
+    private int settleRechecks;
+
+    /**
+     * Once the open shade has stopped moving, force the header/clock views onto the rest pose and
+     * re-verify shortly after, in case a late native setPosition or a stale view reference left
+     * the clock translated up against the carrier row. Idempotent and cheap: it runs once per
+     * opening plus two delayed checks.
+     */
+    private void settleHeaderIfOpen() {
+        if (splitOpenAnimator == null || !shadeSettledOpen()) return;
+        QsModel model = notificationRows.model;
+        if (model.translation.value != 0f || model.translation.target != 0f) model.translation.snapTo(0f);
+        // The animator's wrappers can be rebuilt between openings; read the live views again.
+        captureSplitViews(splitOpenAnimator);
+        float worst = 0f;
+        for (int i = 0; i < splitHeaderViews.length; i++) {
+            View v = splitHeaderViews[i];
+            if (v != null && !nestedHeader[i]) worst = Math.max(worst, Math.abs(v.getTranslationY()));
+        }
+        applySplitHeaderPosition(splitOpenAnimator);
+        if (worst > 0.5f) {
+            XposedBridge.log(Entry.TAG + ": repaired stranded shade header, translationY was " + worst + " px");
+        }
+        // Re-check twice: one frame-ish later and after the blur/layout settle.
+        settleHandler.removeCallbacks(settleRecheck);
+        if (settleRechecks < 2) {
+            settleRechecks++;
+            settleHandler.postDelayed(settleRecheck, settleRechecks == 1 ? 120L : 450L);
+        }
+    }
+
     private void stopNotificationMotion() {
+        settleHandler.removeCallbacks(settleRecheck);
+        settleRechecks = 0;
         notificationOpening.cancel();
         cancelNotifFrames();
         blurBackground.clear();
