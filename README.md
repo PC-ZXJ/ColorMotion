@@ -23,7 +23,7 @@ The APK is written to `app/build/outputs/apk/installWorkaround/`. This variant i
 ## Layout
 
 - `app` – the module.
-- `nativeBridge` – a small typed adapter, dexed into the APK's assets and loaded with SystemUI's class loader, so per-frame layer and notification work avoids reflection.
+- `nativeBridge` – a small typed adapter, dexed into the APK's assets and loaded with SystemUI's class loader, so per-frame layer and notification work avoids reflection
 - `nativeApi` – compile-only stubs of the SystemUI/Compose members the bridge uses. Never packaged
 
 ## License
