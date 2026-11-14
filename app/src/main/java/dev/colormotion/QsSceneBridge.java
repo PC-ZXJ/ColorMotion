@@ -122,17 +122,6 @@ final class QsSceneBridge {
             rejectedShapes[slot] = null;
             return;
         }
-        // Clear the native animator's cached position before either write path below.
-        // The DirectPlan replay ignores mLastT, but the native fallback (animators whose
-        // shape the direct plan rejects: a listener, an interpolator, an unknown property
-        // or wrapper) still goes through TouchAnimator.setPosition, which skips the write
-        // when t equals the cached value. That strands a stale per-view pose on exactly
-        // the rejected animator's views while the planned ones are repaired, which shows
-        // up as the clock stuck over the carrier row. Clearing the cache also keeps a
-        // later native call during an excluded transition from skipping over a pose this
-        // module overwrote. Best effort only: a failed clear must not block the write.
-        try { lastPosition.setFloat(animator, Float.NaN); }
-        catch (IllegalAccessException | IllegalArgumentException ignored) { /* Fall through. */ }
         if (direct != null) {
             if (plannedAnimators[slot] != animator || (plans[slot] != null && !plans[slot].matches())
                     || (rejectedShapes[slot] != null && !rejectedShapes[slot].matches())) {
@@ -286,15 +275,10 @@ final class QsSceneBridge {
             float t = (fraction - start) / span;
             if (t < 0f) t = 0f;
             else if (t > 1f) t = 1f;
-            // Always write, even when t equals the native animator's cached mLastT.
-            // mLastT is shared with native code paths (direct TouchAnimator runs during
-            // excluded transitions) that know nothing about this module's own spring
-            // overrides of the same views. Skipping on equality strands a stale pose:
-            // the header and clock animators cache mLastT independently, so one can be
-            // repaired while the other keeps a stale translation, which shows up as the
-            // clock stuck over the carrier row until some other transition happens to
-            // rewrite it. These writes are idempotent float setters; repeat writes are
-            // the repair mechanism the module relies on, so never skip them.
+            if (t == last.getFloat(animator)) return;
+            // Native TouchAnimator only writes mLastT inside its listener branch. These
+            // listener-free plans intentionally keep that behavior, including repeat writes
+            // that can repair a pose changed by another native/module consumer.
             int sharedIndex = 0;
             float sharedFraction = 0f;
             if (sharedGeometry) {
