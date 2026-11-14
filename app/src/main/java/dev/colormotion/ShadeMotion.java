@@ -845,6 +845,7 @@ final class ShadeMotion {
             qsRows.setArmed(true);
         } else {
             qsRows.setArmed(false);
+            releaseStaleQsHost();
             notificationDriven = true;
             notificationOpening.setHost(root);
             if (root != null) {
@@ -1278,6 +1279,19 @@ final class ShadeMotion {
                 b.append("\n  root ").append(viewTag(root));
                 dumpChildren(b, root, 1, 3, new int[] {0});
             }
+            b.append("\n  ancestors of slot1:");
+            View a = splitHeaderViews[1];
+            for (int n = 0; a != null && n < 14; n++) {
+                b.append("\n    ").append(viewTag(a)).append(" y=").append(a.getY());
+                android.view.ViewParent pp = a.getParent();
+                a = pp instanceof View ? (View) pp : null;
+            }
+            b.append("\n  qsMotionView ").append(viewTag(qsMotionView.get()));
+            try { b.append("\n  qsView ").append(viewTag(qsView())); } catch (Throwable ignored) { }
+            if (splitHeaderViews[0] instanceof android.view.ViewGroup) {
+                b.append("\n  slot0 subtree:");
+                dumpChildren(b, splitHeaderViews[0], 1, 3, new int[] {0});
+            }
             XposedBridge.log(b.toString());
         } catch (Throwable t) { log(t); }
     }
@@ -1431,8 +1445,26 @@ final class ShadeMotion {
         return false;
     }
 
+    /**
+     * The header clock lives inside the QS fragment's view. When a QS opening collapses, snapHidden()
+     * leaves that host translated to its hidden offset; the notification shade never resets it,
+     * so the next notification opening shows the clock lifted against the carrier row.
+     */
+    private void releaseStaleQsHost() {
+        View host = qsMotionView.get();
+        if (host == null) {
+            host = qsView();
+            if (host != null) qsMotionView = new WeakReference<>(host);
+        }
+        if (host != null && host.getTranslationY() != 0f) {
+            XposedBridge.log(Entry.TAG + ": released stale QS host translation " + host.getTranslationY());
+            host.setTranslationY(0f);
+        }
+    }
+
     private void applySplitHeaderPosition(Object animator) {
         if (npvc == null || panel.barState(npvc) != 0 || panelSwitching || panel.side(npvc) > SIDE_SHADE) return;
+        if (side == SIDE_SHADE) releaseStaleQsHost();
         if (side == SIDE_SHADE && !notificationDriven) return;
         if (panel.fraction(npvc) == 0f && !dragging && !inFling) return;
         QsModel model = motionModel();
